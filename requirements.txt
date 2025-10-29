@@ -3,3 +3,6 @@ gspread
 gspread-dataframe
 pandas
 google-auth
+konlpy
+matplotlib
+wordcloud
