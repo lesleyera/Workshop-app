@@ -5,42 +5,33 @@ from gspread_dataframe import set_with_dataframe
 import datetime
 import ast 
 import os
-import json # JSON 처리를 위해 import
+import json
 
 # --- 1. 페이지 설정 및 구글 시트 연동 ---
 st.set_page_config(page_title="행동강령 워크샵", layout="wide")
 
 try:
-    # --- (중요) 수정된 인증 블록 ---
-    # 로컬(PC)에서 실행할 때: google-credentials.json 파일을 직접 사용
+    # 로컬(PC) vs Streamlit Cloud(배포) 인증 분기
     credentials_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "google-credentials.json")
 
     if os.path.exists(credentials_path):
         gc = gspread.service_account(filename=credentials_path)
-    
-    # Streamlit Cloud에서 실행할 때: st.secrets에서 보안 비밀을 읽어 사용
     else:
-        # st.secrets에서 "gcp_service_account"라는 키로 저장된 JSON 내용을 읽어옴
         creds_dict = st.secrets["gcp_service_account"]
         gc = gspread.service_account_from_dict(creds_dict)
-    # --- 수정된 블록 끝 ---
 
-    # --- (중요) 여기에 구글 시트 파일의 '정확한 이름'을 입력하세요 ---
     GOOGLE_SHEET_NAME = "(DWG) 워크샵 응답" 
-    
     sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
 
 except gspread.exceptions.SpreadsheetNotFound:
-    st.error(f"'{GOOGLE_SHEET_NAME}' 이름의 구글 시트 파일을 찾을 수 없습니다. [1단계] 설정을 확인하세요.")
+    st.error(f"'{GOOGLE_SHEET_NAME}' 이름의 구글 시트 파일을 찾을 수 없습니다.")
     st.stop()
 except Exception as e:
     st.error(f"구글 시트 연결 중 오류 발생: {e}")
     st.error("google-credentials.json 파일 / Streamlit Secrets 설정 / 시트 공유 상태를 확인하세요.")
     st.stop()
 
-
 # --- 2. 세션 상태 초기화 ---
-# (이하 코드는 이전과 동일합니다)
 if 'submitted' not in st.session_state:
     st.session_state.submitted = False
 
@@ -50,7 +41,7 @@ keys_to_init = {
     'causes': [], 'causes_etc': "",
     'impacts': [], 'impacts_etc': "",
     'do1': "", 'do2': "", 'do3': "",
-    'dont1': "", 'dont2': "", 'dont3': "",
+    'dont1': "", 'dont2', 'dont3': "",
     'my_plan': "", 'team_plan': ""
 }
 for key, default_value in keys_to_init.items():
@@ -64,15 +55,17 @@ def load_data():
     df = pd.DataFrame(data)
     return df
 
-def process_multiselect_column(df, column_name):
-    def safe_literal_eval(s):
-        try:
-            if isinstance(s, list): return s
-            if isinstance(s, str) and s.startswith('[') and s.endswith(']'):
-                return ast.literal_eval(s)
-            return []
-        except (ValueError, SyntaxError): return []
+# 문자열로 저장된 리스트를 실제 리스트로 변환하는 함수
+def safe_literal_eval(s):
+    try:
+        if isinstance(s, list): return s
+        if isinstance(s, str) and s.startswith('[') and s.endswith(']'):
+            return ast.literal_eval(s)
+        return []
+    except (ValueError, SyntaxError): return []
 
+# 다중 선택 컬럼을 처리하여 빈도수 계산
+def process_multiselect_column(df, column_name):
     if df.empty or column_name not in df.columns:
         return pd.Series(dtype=int)
 
@@ -94,10 +87,13 @@ mode = st.sidebar.radio(
     ("1. 워크샵 참여 (참가자용)", "2. 통계 대시보드 (진행자용)")
 )
 
+# --- ================================== ---
 # --- 5. 모드 1: 워크샵 참여 (참가자용) ---
+# --- ================================== ---
 if mode == "1. 워크샵 참여 (참가자용)":
 
     if not st.session_state.submitted:
+        # --- [참여 폼] ---
         st.title("[워크샵 자료집] 임직원 커뮤니케이션 및 행동강령 수립")
         st.caption("Powered by (주)디센트워킹그룹")
         st.info("워크샵 내용을 탭별로 작성하신 후, 마지막 탭에서 '제출하기' 버튼을 눌러주세요.")
@@ -176,11 +172,17 @@ if mode == "1. 워크샵 참여 (참가자용)":
             for key in keys_to_init.keys(): st.session_state[key] = keys_to_init[key]
             st.experimental_rerun()
 
+# --- ======================================= ---
 # --- 6. 모드 2: 통계 대시보드 (진행자용) ---
+# --- ======================================= ---
 elif mode == "2. 통계 대시보드 (진행자용)":
+    
     st.title("📊 실시간 통계 대시보드 (진행자용)")
+    st.info("참가자들이 제출하는 현황이 실시간으로 집계됩니다.")
+
     try:
-        df = load_data()
+        # 구글 시트에서 '원본' 데이터를 로드합니다.
+        df_original = load_data() 
     except Exception as e:
         st.error(f"데이터 로드 중 오류 발생: {e}")
         st.stop()
@@ -189,30 +191,128 @@ elif mode == "2. 통계 대시보드 (진행자용)":
         st.cache_data.clear()
         st.experimental_rerun()
     
-    if df.empty:
+    if df_original.empty:
         st.warning("아직 제출된 응답이 없습니다.")
     else:
-        st.subheader(f"📈 전체 응답 현황 (총 {len(df)}명 응답)")
+        # --- [NEW] 비식별화 로직 ---
+        # 통계 분석 및 경로 분석은 '원본' 데이터(df_original)로 수행합니다.
+        # 화면 표시는 '비식별화'된 데이터(df_display)로 수행합니다.
+        df_display = df_original.copy()
+
+        def anonymize_name(name_str):
+            """이름을 비식별화하는 함수"""
+            name_str = str(name_str) # 문자열로 변환
+            if "A팀" in name_str:
+                return "A팀 ***"
+            elif "B팀" in name_str:
+                return "B팀 ***"
+            elif "C팀" in name_str:
+                return "C팀 ***"
+            elif "팀" in name_str: # 그 외 다른 팀이 있을 경우
+                parts = name_str.split(" ")
+                if parts[0].endswith("팀"):
+                    return f"{parts[0]} ***"
+            return "참가자 ***" # 팀 정보가 없는 경우
+        
+        # 'name' 컬럼이 존재하면, df_display의 'name' 컬럼에 비식별화 함수 적용
+        if 'name' in df_display.columns:
+            df_display['name'] = df_display['name'].apply(anonymize_name)
+        # --- 비식별화 로직 끝 ---
+
+        # --- 위험 경로 분석 (원본 df_original 사용) ---
+        st.subheader("🚨 주요 위험 경로 분석 (Path Analysis)")
+        st.caption("참가자들이 선택한 [원인]과 [영향]을 조합하여 가장 빈번하게 나타난 '위험 경로'를 표시합니다.")
+
+        # 원본 데이터로 리스트 변환
+        if 'causes' in df_original.columns:
+            df_original['causes_list'] = df_original['causes'].apply(safe_literal_eval)
+        else:
+            df_original['causes_list'] = [[] for _ in range(len(df_original))]
+
+        if 'impacts' in df_original.columns:
+            df_original['impacts_list'] = df_original['impacts'].apply(safe_literal_eval)
+        else:
+            df_original['impacts_list'] = [[] for _ in range(len(df_original))]
+
+        risk_paths = {
+            "심리적 안전감 부족 → 핵심 인력 퇴사": (
+                '솔직하게 말하기 어려워서 (심리적 안전감 부족)', '핵심 인력 퇴사 (번아웃)'
+            ),
+            "피드백 부재 → 불필요한 감정 소모": (
+                '피드백 문화가 부재해서', '불필요한 감정 소모'
+            ),
+            "R&R 불명확 → 부서 간 이기주의": (
+                '명확한 R&R이 없어서', '부서 간 이기주의 심화'
+            ),
+            "정보 불투명 → 업무/프로젝트 지연": (
+                '서로의 업무/일정을 몰라서', '업무/프로젝트 지연'
+            )
+        }
+        
+        path_counts = {}
+        for path_name, (cause, impact) in risk_paths.items():
+            count = len(df_original[
+                df_original['causes_list'].apply(lambda x: cause in x) & 
+                df_original['impacts_list'].apply(lambda x: impact in x)
+            ])
+            path_counts[path_name] = count
+
+        sorted_paths = sorted(path_counts.items(), key=lambda item: item[1], reverse=True)
+
         col1, col2, col3 = st.columns(3)
+        
         with col1:
-            st.markdown("#### 1. 공감된 감정")
-            emotion_counts = process_multiselect_column(df, 'emotions')
-            if not emotion_counts.empty: st.bar_chart(emotion_counts)
+            if len(sorted_paths) > 0 and sorted_paths[0][1] > 0:
+                st.metric(label=f"[위험 경로 1위] {sorted_paths[0][0]}", value=f"{sorted_paths[0][1]} 건", delta="심각", delta_color="inverse")
+            else:
+                st.info("아직 주요 위험 경로는 발견되지 않았습니다.")
         with col2:
-            st.markdown("#### 2. 진단된 문제 원인")
-            cause_counts = process_multiselect_column(df, 'causes')
-            if not cause_counts.empty: st.bar_chart(cause_counts)
+            if len(sorted_paths) > 1 and sorted_paths[1][1] > 0:
+                st.metric(label=f"[위험 경로 2위] {sorted_paths[1][0]}", value=f"{sorted_paths[1][1]} 건", delta="경고", delta_color="inverse")
         with col3:
-            st.markdown("#### 3. 예상되는 악영향")
-            impact_counts = process_multiselect_column(df, 'impacts')
-            if not impact_counts.empty: st.bar_chart(impact_counts)
+            if len(sorted_paths) > 2 and sorted_paths[2][1] > 0:
+                st.metric(label=f"[위험 경로 3위] {sorted_paths[2][0]}", value=f"{sorted_paths[2][1]} 건", delta="주의", delta_color="inverse")
         
         st.divider()
-        st.subheader("📝 행동강령 및 실천 계획안")
+        # --- 위험 경로 분석 끝 ---
+
+        st.subheader(f"📈 전체 응답 현황 (총 {len(df_original)}명 응답)")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        # 통계 차트는 원본 df_original 사용
+        with col1:
+            st.markdown("#### 1. 공감된 감정")
+            emotion_counts = process_multiselect_column(df_original, 'emotions')
+            if emotion_counts.empty: st.write("_(응답 없음)_")
+            else: st.bar_chart(emotion_counts)
+
+        with col2:
+            st.markdown("#### 2. 진단된 문제 원인")
+            cause_counts = process_multiselect_column(df_original, 'causes')
+            if cause_counts.empty: st.write("_(응답 없음)_")
+            else: st.bar_chart(cause_counts)
+        
+        with col3:
+            st.markdown("#### 3. 예상되는 악영향")
+            impact_counts = process_multiselect_column(df_original, 'impacts')
+            if impact_counts.empty: st.write("_(응답 없음)_")
+            else: st.bar_chart(impact_counts)
+        
+        st.divider()
+
+        # --- 화면 표시 (비식별화 df_display 사용) ---
+        st.subheader("📝 행동강령 및 실천 계획안 (비식별화)")
         columns_to_show = ['name', 'do1', 'dont1', 'my_plan', 'team_plan']
-        available_columns = [col for col in columns_to_show if col in df.columns]
-        if available_columns: st.dataframe(df[available_columns], use_container_width=True)
+        available_columns = [col for col in columns_to_show if col in df_display.columns]
+        
+        if not available_columns:
+            st.warning("표시할 데이터가 없습니다. (컬럼명 확인 필요)")
+        else:
+            # 비식별화된 df_display 사용
+            st.dataframe(df_display[available_columns], use_container_width=True) 
 
         st.divider()
-        st.subheader("📋 전체 원본 데이터 (Raw Data)")
-        st.dataframe(df, use_container_width=True)
+        st.subheader("📋 전체 원본 데이터 (비식별화)")
+        # 비식별화된 df_display 사용
+        st.dataframe(df_display, use_container_width=True)
